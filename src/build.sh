@@ -6,18 +6,22 @@ set -e
 
 echo "Building Simple Loop LICM Pass..."
 
-# Create build directory
+# Step 1: Create a build directory to keep the source tree clean
 mkdir -p build
 cd build
 
-# Configure with CMake
+# Step 2: Configure the project with CMake 
+# This detects LLVM and generates the necessary Makefiles
 cmake ..
 
-# Build
+# Step 3: Compile the project
+# This produces the shared object (.so) file
 make
 
 echo "Build complete! The pass is located at: build/SimpleLoopLICM.so"
 echo ""
+
+# Step 4: Output usage instructions for the user
 echo "To use the pass:"
-echo "  clang -O0 -emit-llvm -S test.c -o test.ll"
-echo "  opt -load-pass-plugin=./build/SimpleLoopLICM.so -passes=simple-licm -S test.ll -o test_opt.ll"
+echo "  1. Compile C code to LLVM IR: clang -O0 -emit-llvm -S test.c -o test.ll"
+echo "  2. Run the pass using opt: opt -load-pass-plugin=./build/SimpleLoopLICM.so -passes=simple-licm -S test.ll -o test_opt.ll"

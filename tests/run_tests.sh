@@ -1,10 +1,9 @@
 #!/bin/bash
 
-# Script to run all tests and generate optimized versions
-
+# Step 1: Environment Setup
+# Detect and set paths for LLVM tools (Clang, Opt, LLC)
 set -e
 
-# Try to use LLVM 17 tools explicitly
 if command -v clang-17 &> /dev/null; then
     CLANG=clang-17
     OPT=opt-17
@@ -20,9 +19,10 @@ fi
 
 echo "Using: $CLANG, $OPT, $LLC"
 
+# Step 2: Validate Pass Plugin
+# Ensure the custom LLVM pass library exists before proceeding
 PASS_LIB="../src/build/libSimpleLoopLICM.so"
 
-# Try alternative name if not found
 if [ ! -f "$PASS_LIB" ]; then
     PASS_LIB="../src/build/SimpleLoopLICM.so"
 fi
@@ -35,41 +35,39 @@ fi
 
 echo "Using pass library: $PASS_LIB"
 
-echo "Running tests..."
-echo "=================="
-
-# Create output directory
+# Step 3: Initialize Output Directory
 mkdir -p results
-
-# Test files
 TESTS=("test1_simple" "test2_nested" "test3_complex" "test4_dependency" "test5_safety")
 
+# Step 4: Iterative Compilation and Optimization
 for test in "${TESTS[@]}"; do
     echo ""
     echo "Processing $test.c..."
     
-    # 1. Compile to LLVM IR
-    # 使用 -O1 但加上 -disable-llvm-passes 獲得比較乾淨的 IR
+    # 4.1: Source to LLVM IR
+    # We use -O1 but disable passes to get a clean IR starting point for our pass
     $CLANG -O1 -Xclang -disable-llvm-passes -emit-llvm -S ${test}.c -o results/${test}.ll
     
-    # 2. Apply our optimization pass
-    # 順序: mem2reg (轉 SSA) -> simplify/rotate (整理迴圈) -> OUR_PASS -> instcombine/dce (清理)
+    # 4.2: Apply Custom Optimization Pipeline
+    # Pipeline: Convert to SSA (mem2reg) -> Prepare loops (rotate) -> Run CUSTOM LICM -> Clean up (dce)
     echo "  Running optimization pass..."
     
     $OPT -load-pass-plugin=$PASS_LIB \
         -passes='mem2reg,instcombine,loop-simplify,loop-rotate,simple-licm,dce' -S \
         results/${test}.ll -o results/${test}_opt.ll 2>&1 | grep -E "(Processing|Found|Checking|Successfully|Hoisting)"
     
-    # 3. Generate Assembly, Object Files & Executables
-    # Convert IR to Assembly
+    # 4.3: Lowering (IR to Assembly)
+    # Convert both original and optimized IR into target-specific assembly code
     $LLC results/${test}.ll -o results/${test}.s
     $LLC results/${test}_opt.ll -o results/${test}_opt.s
 
-    # [FIX] Explicitly generate Object Files for Code Size analysis
+    # 4.4: Assembler (Assembly to Object Files)
+    # Explicitly generate .o files for static size analysis
     $CLANG -c results/${test}.s -o results/${test}.o
     $CLANG -c results/${test}_opt.s -o results/${test}_opt.o
     
-    # Link to Executables (using -no-pie to fix linker error)
+    # 4.5: Linking (Object to Executables)
+    # Generate the final binaries. -no-pie is used to ensure compatibility in certain environments
     $CLANG -no-pie results/${test}.s -o results/${test}_original
     $CLANG -no-pie results/${test}_opt.s -o results/${test}_optimized
     

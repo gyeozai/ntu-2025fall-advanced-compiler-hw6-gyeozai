@@ -18,18 +18,20 @@ namespace {
 struct LoopLICMPass : public PassInfoMixin<LoopLICMPass> {
   
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
+    // Step 1: Skip external declarations; only process defined functions
     if (F.isDeclaration())
       return PreservedAnalyses::all();
 
     errs() << "Processing function: " << F.getName() << "\n";
 
+    // Step 2: Retrieve necessary analysis results (Loop Information and Dominator Tree)
     auto &LI = FAM.getResult<LoopAnalysis>(F);
     auto &DT = FAM.getResult<DominatorTreeAnalysis>(F);
 
     bool Modified = false;
     
-    // 我們使用後序遍歷 (Post-Order) 來處理迴圈
-    // 這樣可以先處理內層迴圈，再處理外層迴圈
+    // Step 3: Iterate through loops
+    // We process inner loops first (Post-Order style) to maximize hoisting efficiency
     for (auto *L : LI) {
       for (auto *SubL : L->getLoopsInPreorder()) {
          Modified |= processLoop(SubL, LI, DT);
@@ -37,17 +39,19 @@ struct LoopLICMPass : public PassInfoMixin<LoopLICMPass> {
       Modified |= processLoop(L, LI, DT);
     }
 
+    // Step 4: Signal the Pass Manager if the IR was modified
     if (Modified) {
       return PreservedAnalyses::none();
     }
     return PreservedAnalyses::all();
   }
 
-  // 核心邏輯：處理單個迴圈
+  // Core Logic: Processing a single loop
   bool processLoop(Loop *L, LoopInfo &LI, DominatorTree &DT) {
     bool Changed = false;
     
-    // 1. 確保迴圈有 Preheader (我們可以把東西搬過去的地方)
+    // Step 1: Ensure the loop has a Preheader
+    // This is the destination block where hoisted instructions will be moved
     BasicBlock *Preheader = L->getLoopPreheader();
     if (!Preheader) {
       errs() << "  Loop does not have a single preheader. Skipping.\n";
@@ -56,27 +60,24 @@ struct LoopLICMPass : public PassInfoMixin<LoopLICMPass> {
 
     errs() << "  Checking Loop at depth " << L->getLoopDepth() << "\n";
 
-    // 2. 收集所有想要外提的指令
-    // 我們不能邊遍歷邊修改，所以先存起來
+    // Step 2: Collect instructions that are eligible for hoisting
+    // We store them in a vector first to avoid modifying the block while iterating
     std::vector<Instruction*> InstructionsToHoist;
 
     for (BasicBlock *BB : L->blocks()) {
-      // 簡單起見，我們只處理 Loop Header 或是必定執行的 block (這裡簡化處理所有 block)
-      // 在嚴格的 LICM 中需要確認該 block 是否支配所有出口，但作業示範我們先檢查指令本身
-      
       for (Instruction &I : *BB) {
-        // 檢查指令是否適合外提
+        // Step 3: Check if the instruction is a loop invariant
         if (canHoist(I, L)) {
            InstructionsToHoist.push_back(&I);
         }
       }
     }
 
-    // 3. 執行搬移 (Hoisting)
+    // Step 4: Perform the Hoisting (Movement)
     for (Instruction *I : InstructionsToHoist) {
       errs() << "    Hoisting instruction: " << I->getOpcodeName() << "\n";
       
-      // 將指令搬移到 Preheader 的終止指令(Branch)之前
+      // Move instruction to the end of the preheader (just before the branch)
       I->moveBefore(Preheader->getTerminator());
       Changed = true;
     }
@@ -87,38 +88,33 @@ struct LoopLICMPass : public PassInfoMixin<LoopLICMPass> {
     return Changed;
   }
 
-  // 檢查指令是否為迴圈不變量 (Loop Invariant) 且安全可移動
+  // Safety and Invariance Check
   bool canHoist(Instruction &I, Loop *L) {
-    // 條件 1: 必須是「安全」的指令
-    // 我們不移動 Memory Load/Store (除非有 Alias Analysis)，不移動 Call，不移動 Branch
-    // 只移動簡單的算術運算 (Binary Operators)
+    // Step 1: Filter by instruction type
+    // We only move simple arithmetic/logic; avoid Memory (Load/Store), Calls, or Branches
     if (!I.isBinaryOp() && !I.isShift() && !I.isBitwiseLogicOp() && !isa<CastInst>(I)) {
       return false;
     }
 
-    // 條件 2: 不能有 Side Effects (例如除以 0)
-    // isSafeToSpeculativelyExecute 幫助我們檢查這個指令是否會造成 Crash
+    // Step 2: Check for potential side effects
+    // Ensure the instruction won't crash (e.g., division by zero) if executed speculatively
     if (!isSafeToSpeculativelyExecute(&I)) {
       return false;
     }
 
-    // 條件 3: 操作數 (Operands) 必須是迴圈不變量 (Loop Invariant)
-    // 也就是說，所有輸入參數要嘛是常數，要嘛是在迴圈外部定義的
+    // Step 3: Verify that all operands are Loop Invariants
+    // All inputs must be constants, function arguments, or defined outside this loop
     for (Use &Op : I.operands()) {
       Value *V = Op.get();
       
-      // 如果操作數是常數，那就是不變的
       if (isa<Constant>(V)) continue;
       
-      // 如果操作數是指令，檢查它是否定義在迴圈內
       if (Instruction *OpInst = dyn_cast<Instruction>(V)) {
         if (L->contains(OpInst)) {
-          // 定義在迴圈內，那這個指令就不是不變量 (除非我們已經遞迴地證明它是，但這裡簡化)
+          // If the operand is defined inside the loop, it's not invariant
           return false;
         }
       }
-      
-      // 如果是參數 (Argument)，那一定是在外部定義的，安全
     }
 
     return true;
@@ -127,6 +123,7 @@ struct LoopLICMPass : public PassInfoMixin<LoopLICMPass> {
 
 } // end anonymous namespace
 
+// Step 5: Register the pass as a plugin for the LLVM 'opt' tool
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
   return {
